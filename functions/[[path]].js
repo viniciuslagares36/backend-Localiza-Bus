@@ -59,6 +59,78 @@ function flattenVehicles(rawData) {
   return vehicles;
 }
 
+
+// Normaliza a linha digitada/retornada pela API para a busca não depender de formato exato.
+// Exemplo real: o usuário pode digitar "0401", "401", "0.401" ou "401.1".
+// Antes o backend comparava tudo no seco e só funcionava se viesse exatamente igual.
+function normalizeLineText(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .replace(/-/g, '')
+    .replace(/_/g, '')
+    .replace(/,/g, '.');
+}
+
+// Versão só com números. Ajuda quando a API vem com ponto e o usuário digita sem ponto.
+// Exemplo: "0.401" vira "0401" e "401.1" vira "4011".
+function onlyDigits(value) {
+  return normalizeLineText(value).replace(/\D/g, '');
+}
+
+// Remove zeros à esquerda só para comparação numérica.
+// Exemplo: "0401" e "401" passam a ser tratados como a mesma linha.
+function stripLeadingZeros(value) {
+  return String(value || '').replace(/^0+(?=\d)/, '');
+}
+
+// Cria variações de comparação para uma linha.
+// Mantive separado e comentado para você conseguir mexer fácil depois.
+function getLineVariants(value) {
+  const clean = normalizeLineText(value);
+  const digits = onlyDigits(value);
+  const noLeadingZeroDigits = stripLeadingZeros(digits);
+  const noDot = clean.replace(/\./g, '');
+  const noLeadingZeroClean = clean.replace(/^0+(?=\d)/, '');
+
+  return new Set(
+    [clean, digits, noLeadingZeroDigits, noDot, noLeadingZeroClean]
+      .filter(Boolean)
+  );
+}
+
+// Decide se a linha do ônibus combina com o que o usuário pesquisou.
+// A regra principal é igualdade entre variações normalizadas.
+// A regra de "começa com" só entra quando a busca tem pelo menos 3 números,
+// para evitar que pesquisar "1" traga ônibus demais sem querer.
+function matchesLine(vehicleLine, searchedLine) {
+  const vehicleVariants = getLineVariants(vehicleLine);
+  const searchVariants = getLineVariants(searchedLine);
+
+  for (const searchVariant of searchVariants) {
+    if (vehicleVariants.has(searchVariant)) return true;
+  }
+
+  const searchedDigits = stripLeadingZeros(onlyDigits(searchedLine));
+
+  if (searchedDigits.length >= 3) {
+    for (const vehicleVariant of vehicleVariants) {
+      const vehicleDigits = stripLeadingZeros(onlyDigits(vehicleVariant));
+
+      if (
+        vehicleDigits === searchedDigits ||
+        vehicleDigits.startsWith(searchedDigits) ||
+        searchedDigits.startsWith(vehicleDigits)
+      ) {
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
 async function getDftransGps() {
   const response = await fetch(DFTRANS_GPS_URL, {
     method: 'GET',
@@ -129,15 +201,18 @@ async function getVehiclesByLine(url) {
 
   if (!data.ok) return gpsResponse;
 
-  const linha = String(url.searchParams.get('linha') || '')
-    .trim()
-    .toLowerCase();
+  // Pegamos a linha do parâmetro da URL.
+  // Exemplo: /api/vehicles?linha=0401 ou /api/vehicles?linha=0.401
+  const linhaOriginal = String(url.searchParams.get('linha') || '').trim();
+  const linhaNormalizada = normalizeLineText(linhaOriginal);
 
   let vehicles = data.vehicles || [];
 
-  if (linha) {
-    vehicles = vehicles.filter(
-      (vehicle) => String(vehicle.linha || '').toLowerCase() === linha
+  if (linhaNormalizada) {
+    // Aqui estava o problema: antes era uma comparação exata.
+    // Agora o backend aceita variações com zero na frente, ponto e sem ponto.
+    vehicles = vehicles.filter((vehicle) =>
+      matchesLine(vehicle.linha, linhaOriginal)
     );
   }
 
@@ -146,7 +221,8 @@ async function getVehiclesByLine(url) {
     source: data.source,
     updatedAt: data.updatedAt,
     updatedAtMs: data.updatedAtMs,
-    linha: linha || null,
+    linha: linhaOriginal || null,
+    linhaNormalizada: linhaNormalizada || null,
     total: vehicles.length,
     vehicles,
   });
